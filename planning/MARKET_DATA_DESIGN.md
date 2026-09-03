@@ -192,8 +192,9 @@ Design decisions:
 - **`change` / `change_percent` / `direction` are computed properties, not stored fields.**
   They are pure functions of `price` and `previous_price`, so storing them would be a
   chance to store them inconsistently. `to_dict()` materialises them for the wire.
-- **`timestamp` is Unix seconds (float).** Massive returns milliseconds; the client divides
-  by 1000 at the boundary so everything inside the layer speaks one unit.
+- **`timestamp` is Unix seconds (float).** Massive's `last_trade.timestamp` is in
+  nanoseconds; the client divides by `1_000_000_000` at the boundary so everything inside
+  the layer speaks one unit.
 
 Worked example:
 
@@ -1101,8 +1102,8 @@ class MassiveDataSource(MarketDataSource):
             for snap in snapshots:
                 try:
                     price = snap.last_trade.price
-                    # Massive timestamps are Unix milliseconds → convert to seconds
-                    timestamp = snap.last_trade.timestamp / 1000.0
+                    # Massive client timestamps are Unix nanoseconds → convert to seconds
+                    timestamp = snap.last_trade.timestamp / 1_000_000_000
                     self._cache.update(
                         ticker=snap.ticker,
                         price=price,
@@ -1711,7 +1712,7 @@ if price is not None:
 self._cache.update(
     ticker=snap.ticker,
     price=snap.last_trade.price,
-    timestamp=snap.last_trade.timestamp / 1000.0,
+    timestamp=snap.last_trade.timestamp / 1_000_000_000,
     baseline=getattr(snap.day, "previous_close", None) or None,
 )
 ```
