@@ -101,7 +101,6 @@ finally/
 ├── db/                       # Volume mount target (SQLite file lives here at runtime)
 │   └── .gitkeep              # Directory exists in repo; finally.db is gitignored
 ├── Dockerfile                # Multi-stage build (Node → Python)
-├── docker-compose.yml        # Optional convenience wrapper
 ├── .env                      # Environment variables (gitignored, .env.example committed)
 └── .gitignore
 ```
@@ -155,6 +154,7 @@ Both the simulator and the Massive client implement the same abstract interface.
 - Occasional random "events" — sudden 2-5% moves on a ticker for drama
 - Starts from realistic seed prices (e.g., AAPL ~$190, GOOGL ~$175, etc.)
 - Runs as an in-process background task — no external dependencies
+- **Unseeded tickers** (added later via the watchlist API or the LLM, outside the default 10): assigned generic default GBM params (moderate drift/volatility) and a generic default seed price. The API/chat response should flag that this ticker's price is a generic simulation, not a per-ticker calibrated one.
 
 ### Massive API (Optional)
 
@@ -178,6 +178,7 @@ Both the simulator and the Massive client implement the same abstract interface.
 - Server pushes price updates for all tickers known to the system at a regular cadence (~500ms) — in the single-user model this is equivalent to the user's watchlist
 - Each SSE event contains ticker, price, previous price, timestamp, and change direction
 - Client handles reconnection automatically (EventSource has built-in retry)
+- Per-ticker price history is intentionally not persisted server-side — sparklines (§2) and the main chart (§10) are built entirely from prices accumulated client-side since page load. A page refresh clears them by design; there is no `price_history` table.
 
 ---
 
@@ -270,6 +271,7 @@ All tables include a `user_id` column defaulting to `"default"`. This is hardcod
 ### Chat
 | Method | Path | Description |
 |--------|------|-------------|
+| GET | `/api/chat` | Load the last 10 messages from `chat_messages` (rehydrates the chat panel on page load) |
 | POST | `/api/chat` | Send a message, receive complete JSON response (message + executed actions) |
 
 ### System
@@ -290,7 +292,7 @@ There is an OPENROUTER_API_KEY in the .env file in the project root.
 When the user sends a chat message, the backend:
 
 1. Loads the user's current portfolio context (cash, positions with P&L, watchlist with live prices, total portfolio value)
-2. Loads recent conversation history from the `chat_messages` table
+2. Loads the last 10 messages from the `chat_messages` table (same window used by `GET /api/chat`)
 3. Constructs a prompt with a system message, portfolio context, conversation history, and the user's new message
 4. Calls the LLM via LiteLLM → OpenRouter, requesting structured output, using the cerebras-inference skill
 5. Parses the complete structured JSON response
@@ -316,7 +318,7 @@ The LLM is instructed to respond with JSON matching this schema:
 
 - `message` (required): The conversational text shown to the user
 - `trades` (optional): Array of trades to auto-execute. Each trade goes through the same validation as manual trades (sufficient cash for buys, sufficient shares for sells)
-- `watchlist_changes` (optional): Array of watchlist modifications
+- `watchlist_changes` (optional): Array of watchlist modifications, each `{"ticker": ..., "action": "add" | "remove"}`
 
 ### Auto-Execution
 
@@ -352,7 +354,7 @@ When `LLM_MOCK=true`, the backend returns deterministic mock responses instead o
 
 The frontend is a single-page application with a dense, terminal-inspired layout. The specific component architecture and layout system is up to the Frontend Engineer, but the UI should include these elements:
 
-- **Watchlist panel** — grid/table of watched tickers with: ticker symbol, current price (flashing green/red on change), daily change %, and a sparkline mini-chart (accumulated from SSE since page load)
+- **Watchlist panel** — grid/table of watched tickers with: ticker symbol, current price (flashing green/red on change), daily change %, and a sparkline mini-chart (accumulated from SSE since page load). No minimum ticker count is enforced — the watchlist may be emptied to zero (by the user or the LLM); render a friendly empty-state prompt (e.g. "Add a ticker to get started") rather than assuming at least one row.
 - **Main chart area** — larger chart for the currently selected ticker, with at minimum price over time. Clicking a ticker in the watchlist selects it here.
 - **Portfolio heatmap** — treemap visualization where each rectangle is a position, sized by portfolio weight, colored by P&L (green = profit, red = loss)
 - **P&L chart** — line chart showing total portfolio value over time, using data from `portfolio_snapshots`
@@ -364,7 +366,7 @@ The frontend is a single-page application with a dense, terminal-inspired layout
 ### Technical Notes
 
 - Use `EventSource` for SSE connection to `/api/stream/prices`
-- Canvas-based charting library preferred (Lightweight Charts or Recharts) for performance
+- Canvas-based charting library preferred for performance — Lightweight Charts is the reference choice; Recharts (SVG-based) is an acceptable fallback only if canvas rendering isn't feasible
 - Price flash effect: on receiving a new price, briefly apply a CSS class with background color transition, then remove it
 - All API calls go to the same origin (`/api/*`) — no CORS configuration needed
 - Tailwind CSS for styling with a custom dark theme
@@ -400,6 +402,11 @@ docker run -v finally-data:/app/db -p 8000:8000 --env-file .env finally
 ```
 
 The `db/` directory in the project root maps to `/app/db` in the container. The backend writes `finally.db` to this path.
+
+**Docker Desktop-on-Linux compatibility**: some users (including the primary dev environment for this project) have only Docker Desktop installed on Linux, not a system-level Docker Engine — there is no system `dockerd` and `/var/run/docker.sock` may not exist. `scripts/start_mac.sh` and `stop_mac.sh` must therefore:
+- Invoke plain `docker` (and `docker compose`, the v2 CLI plugin — not the standalone `docker-compose` binary, which Docker Desktop doesn't ship) as the invoking user
+- Never run `sudo docker ...` — root doesn't have the user's Docker Desktop CLI context, so `sudo` breaks the connection
+- Never hardcode `DOCKER_HOST` or a socket path — Docker Desktop registers its own CLI context (`desktop-linux`) and the `docker` CLI resolves the correct socket through that context automatically; overriding it will fail
 
 ### Start/Stop Scripts
 
